@@ -1,40 +1,221 @@
 /*
 TODO:
-	* use the custom 'syncmedia' class on sync points instead of regexp #t=...
-	* optionally attach player to something else than header-article-items__start (is book-theme specific and internal)
-	* support other players (like oembed for soundcloud or mixcloud)
 	* use other JS player for media since MP3 seeking is otherwise often off (e.g. wavesurfer.xyz)
 		- (with wavesurfer.xyz, it would be cool to show sections as points in the player)
+	* support youtube videos
 */
-
 
 // polyfill for text fragment links (for browsers which need it)
 if (!('fragmentDirective' in document)) { import('https://unpkg.com/text-fragments-polyfill'); }
 
-document.addEventListener("DOMContentLoaded", function(){
-	let anchors = document.querySelectorAll("a.reference.external")
-	anchors = Array.from(anchors)
-	const audioPat = new RegExp('#t=[0-9:]+$');
-	let n=0;
-	// anchors = anchors.filter(anchor => pat.test(anchor)); // !anchor.href?.includes("mailto:"))
-	for (let anchor of anchors) {
-		if(!anchor.href?.match(/#t=[0-9:]+$/)){
-			console.debug('Non-audio hyperlink:',anchor.href);
-			continue;
+
+
+class Timestamp{
+	time = -1;
+	element = undefined;
+	constructor(time,element){ this.time=time; this.element=element; }
+}
+
+class SyncMedia {
+	/* class for a single syncmedia (media URL) */
+	div = undefined;
+	player = undefined;
+	mediaType = undefined;
+	tag = undefined;
+	timestamps = new Array();
+
+	static instances=Array();
+
+	constructor(div){
+		this.div = div;
+		this.mediaType = SyncMedia.getMediaType(div.getAttribute('data-uri'));
+		this.tag = SyncMedia.getSyncmediaTag(div);
+		this.player = this.makePlayer(div);
+		this.processTimestamps();
+	}
+	static getSyncmediaTag(e){
+		let sp=Array.from(e.classList).filter(function(c){return c.startsWith('syncmedia-player-no-');});
+		console.assert(sp.length==1);
+		return sp[0];
+	}
+
+	static getMediaType(uri){
+		if(uri.startsWith("https://youtube.com/") || uri.startsWith("https://youtu.be/")) return "youtube";
+		else return "audio";
+	}
+
+	processTimestamps(){
+		/* arm timestamp hyperlinks */
+		for(let a of Array.from(document.querySelectorAll(`a.reference.external.syncmedia.${this.tag}`))){
+			const url=new URL(a.href);
+			let match=url.hash.match('#t=([0-9]+)$')
+			if(!match){
+				console.debug('Non-audio tagged hyperlink?',a.href);
+				continue;
+			}
+			console.assert(SyncMedia.getMediaType(a.href)==this.mediaType);
+			/* arm the timestamp */
+			a.addEventListener("click", (ev) => this.timestampClicked(ev));
+			this.timestamps.push(new Timestamp(parseInt(match[1]),a));
 		}
-		anchor.addEventListener("click", myOpenAudioInPlayer);
-		n++;
 	}
-	// no timestamps on this page, nothing to do
-	if(n==0) return;
+
+	makePlayer(div){
+		/* TODO: hide player only when :show: was not given in the source (must be passed via an extra class) */
+		div.style.display="none";
+		switch(this.mediaType){
+			case "audio":
+				let pl=document.createElement('audio');
+				pl.controls=true;
+				pl.autoplay=false;
+				pl.style='width: 100%;';
+				var source=document.createElement('source');
+				source.type='audio/mp3'; // TODO: adjust by URI
+				pl.appendChild(source);
+				div.appendChild(pl);
+				pl.children[0].src=div.getAttribute("data-uri");
+				pl.load(); // if src changed, needs to be reloaded (otherwise previous href will be played)
+				pl.onplay = function() {
+					/* TODO: pause all other players */
+					div.style.display="block"; div.style.position="sticky"; div.classList.add("sticky-top"); div.zIndex=1000;
+				};
+				pl.onpause = function() { div.style.display="none"; div.style.position="relative";  div.classList.remove("sticky-top"); div.zIndex=0; };
+				return pl;
+			case "youtube":
+				console.error("youtube player not yet implemented");
+				return undefined;
+			default:
+				return undefined;
+		};
+	}
+	timestampClicked(ev){
+		// console.log('timestampClicked',ev.srcElement);
+		// console.log(this.mediaType);
+		// console.log(this.player);
+		// console.log(this.tag);
+		ev.preventDefault();
+		let pl = this.player;
+		switch(this.mediaType){
+			case "audio":
+				// setting the href with #t=... does not set time in itself, do it explicitly here:
+				let tt=ev.srcElement.href.split('#')[1].split('=')[1].split(',');
+				// console.warn(ev.srcElement.href,tt);
+				pl.pause();
+				pl.currentTime=Number(tt[0]);
+				// pl.duration=10;
+				console.debug('Seeking to:',tt[0],pl.currentTime);
+				pl.play();
+				// Emphasis.instance.emphasize();
+				break;
+			case "youtube":
+				console.error("youtube not yet implemented.");
+				break;
+			default:
+				console.error("mediaType not one of 'audio','youtube'?",this.mediaType);
+		};
+		return false; // don't follow the HREF
+	};
+	currentTime(){
+		switch(this.mediaType){
+			case "audio": return (this.player.paused ? -1 : this.player.currentTime);
+			case "youtube": console.error("youtube not yet implemented."); return -1;
+		}
+	}
+};
+
+
+
+class Emphasis{
+	static instance = undefined;
+	emph = undefined;
+	dt = 2000; // ms
+	constructor(){
+		this.emph = this.makeEmphElement();
+		this.interval = setInterval(()=>this.emphasize(), this.timeout);
+	};
+	getActiveTimestampsRange(){
+		let ssm = SyncMedia.instances.filter(function(sm){ return sm.currentTime()>=0; });
+		console.assert(ssm.length <= 1);
+		// console.log('Active players:',ssm)
+		if(ssm.length==0) return [undefined,undefined];
+		let sm = ssm[0];
+		let time = sm.currentTime();
+		// console.log('Current time:',time);
+		for(var i=0; i < sm.timestamps.length-1; i++){
+			// console.log(`${sm.timestamps[i].time} <= ${time} < ${sm.timestamps[i+1].time}`);
+			if(sm.timestamps[i].time<=time && sm.timestamps[i+1].time>time){
+				// console.log('HERE!')
+				return [sm.timestamps[i].element,sm.timestamps[i+1].element];
+			}
+		}
+		return [undefined,undefined];
+	}
+	emphasize(){
+		const [e0,e1]=this.getActiveTimestampsRange();
+		if(e0 === undefined) return;
+		// console.log(e0,e1);
+		let parent = e0.closest("p,div"); // <p> or <div> element to get widths
+		let art = this.emph.parentElement;
+		let {x:xa} = art.getBoundingClientRect(); // article as "main" element
+		let {width:w, x} = parent.getBoundingClientRect(); // x,w from <p>
+		let {height:h0, x:x0} = e0.getBoundingClientRect(); // x0,w0,h0 from 1st time stamp
+		let {height:h1, x:x1} = e1.getBoundingClientRect(); // x1,w1,h1 from 2nd time stamp
+		let t0 = e0.offsetTop; // top of 1st time stamp
+		let t1 = e1.offsetTop; // top of 2nd time stamp
+		let h = t1 + h1 - t0; // total emph height
+		let l = x - xa; // emph left
+		let hm = h - h0 - h1; // middle height
+		let l0 = x0 - x; // left of 1st time stamp
+		let wb = x1 /* + w1 */ - x; // width of bottom emph
+		//// use the values to style the emphasis
+		const [emphTop,emphMid,emphBot]=this.emph.children;
+		// let {emph,emphTop,emphMid,emphBot} = this;
+		this.emph.style.width = `${w}px`;
+		this.emph.style.height = `${h}px`;
+		this.emph.style.top = `${t0}px`;
+		this.emph.style.left = `${l}px`;
+		emphTop.style.height = `${h0}px`;
+		emphTop.style.left = `${l0}px`;
+		emphMid.style.height = `${hm}px`;
+		emphMid.style.top = `${h0}px`;
+		emphBot.style.height = `${h1}px`;
+		emphBot.style.bottom = 0;
+		emphBot.style.width = `${wb}px`;
+	}
+	makeEmphElement(){
+		// find main <article> element for dimensions
+		let arts = document.getElementsByTagName("article");
+		console.assert(arts.length==1);
+		let art = arts[0];
+		art.style.position = "relative"
+		// parent element for emphasis
+		let emph = this.emph = document.createElement("div");
+		emph.style.position = "absolute";
+		emph.style.zIndex = -9999;
+		emph.style.overflow = "hidden";
+		// top, middle, bottom
+		for (let i of [0,1,2]){
+			let e = document.createElement("div");
+			e.style.position = "absolute";
+			e.style.backgroundColor = "rgba(0,127,0,0.4)";
+			e.style.width = "100%";
+			emph.appendChild(e);
+		}
+		art.appendChild(emph);
+		return emph;
+	}
+};
+
+
+document.addEventListener("DOMContentLoaded", function(){
 	// toggle timestamps icon
-	addToggleTimestampsIcon();
-	// do the emphasis
-	try {
-		new Emphasizer()
-	} catch(error) {
-		console.warn(error);
+	new ToggleTimestamps();
+	/* construct player instances in <div class="syncmedia-player"> */
+	for(let div of Array.from(document.querySelectorAll("div.syncmedia-player"))){
+		SyncMedia.instances.push(new SyncMedia(div));
 	}
+	/* construct a single emphasizer instance */
+	Emphasis.instance = new Emphasis();
 	/*
 	// for each section, find time range and add play icon next to the title
 	let sections = document.querySelectorAll("section");
@@ -73,185 +254,20 @@ document.addEventListener("DOMContentLoaded", function(){
 	*/
 });
 
-function addToggleTimestampsIcon(){
-	let button=document.createElement('button');
-	button.classList.add('btn','btn-sm','navbar-btn','syncmedia-hide-button');
-	button.innerHTML='<i class="fa-solid fa-lg fa-stopwatch"/>';
-	console.warn(button.innerHTML);
-	let buttons=document.getElementsByClassName('article-header-buttons')[0];
-	buttons.insertBefore(button,buttons.firstChild);
-	button.addEventListener("click",toggleTimestamps);
-}
 
-function toggleTimestamps(){
-	let hide='syncmedia-hide-timestamps';
-	if(document.body.classList.contains(hide)){ console.warn("showing timestamps",document.body.classList); document.body.classList.remove(hide); }
-	else{ console.warn("hiding timestamps",document.body.classList); document.body.classList.add(hide); }
-}
-
-function syncmediaIdTime(href){
-	const url=new URL(href);
-	let time=parseInt(url.hash.match('#t=([0-9]+)$')[1]);
-	let id=url.hostname+url.pathname;
-	return [id,time];
-}
-
-
-function syncmediaInside(e){
-	if(!e) return null;
-	let ss=e.querySelectorAll(":scope .syncmedia");
-	if(ss.length==0) return null;
-	return ss[0];
-}
-
-function myOpenAudioInPlayer(ev){
-   console.log('myOpenAudioInPlayer',ev.srcElement);
-   ev.preventDefault();
-   var player=document.getElementById("my_audio_player");
-   if(player==null){
-      console.log('Creating player.')
-      player=document.createElement('audio');
-      player.controls=true;
-      player.autoplay=false;
-      player.id='my_audio_player';
-      player.style='width: 100%;';
-      var source= document.createElement('source');
-      source.type='audio/mp3';
-      player.appendChild(source);
-      document.getElementsByClassName('header-article-items__start')[0].appendChild(player);
-   } else {
-      // console.debug('Using existing player.');
-   }
-   player.children[0].src=ev.srcElement.href;
-   player.load(); // if src changed, needs to be reloaded (otherwise previous href will be played)
-   // setting the href with #t=... does not set time in itself, do it explicitly here:
-   let tt=ev.srcElement.href.split('#')[1].split('=')[1].split(',');
-   // console.warn(ev.srcElement.href,tt);
-   // let t0=Number(tt[0]);
-   // something going on here: currentTime takes time to be set, so stream may not be seeked completely when play() is called?
-   // is it necessary to pause()?
-   player.pause();
-   player.currentTime=Number(tt[0]);
-   player.duration=10;
-   // console.debug('Moving to time ',t,player.currentTime);
-   player.play();
-   return false; // don't follow the HREF
+class ToggleTimestamps {
+	constructor(){
+		let button=document.createElement('button');
+		button.classList.add('btn','btn-sm','navbar-btn','syncmedia-hide-button');
+		button.innerHTML='<i class="fa-solid fa-lg fa-stopwatch"/>';
+		console.info(button.innerHTML);
+		let buttons=document.getElementsByClassName('article-header-buttons')[0];
+		buttons.insertBefore(button,buttons.firstChild);
+		button.addEventListener("click",this.toggleTimestamps);
+	}
+	toggleTimestamps(){
+		let hide='syncmedia-hide-timestamps';
+		if(document.body.classList.contains(hide)){ console.warn("showing timestamps",document.body.classList); document.body.classList.remove(hide); }
+		else{ console.warn("hiding timestamps",document.body.classList); document.body.classList.add(hide); }
+	}
 };
-
-// auxiliary class
-class Emphasizer {
-	// interval in ms to update the emphasis
-	dt = 2000;
-	timeout = undefined;
-	player = undefined;
-	constructor() {
-		// find main <article> element for dimensions
-		let articles = document.getElementsByTagName("article");
-		if (articles.length !== 1) throw new Error("too many <article> elements for emphasizing");
-		let article = this.article = articles[0];
-		article.style.position = "relative"
-		//
-		// actual emphasis
-		let emph = this.emph = document.createElement("div");
-		emph.style.position = "absolute";
-		emph.style.zIndex = -9999;
-		emph.style.overflow = "hidden";
-		let emphTop = this.emphTop = document.createElement("div");
-		let emphMid = this.emphMid = document.createElement("div");
-		let emphBot = this.emphBot = document.createElement("div");
-		for (let e of [emphTop,emphMid,emphBot]) {
-			e.style.position = "absolute";
-			e.style.backgroundColor = "rgba(0,127,0,0.4)";
-			e.style.width = "100%";
-			emph.appendChild(e);
-		}
-		article.appendChild(emph);
-		//
-		// find time stamps
-		let timeStampsElems = Array.from(article.querySelectorAll("a.reference.external"));
-		timeStampsElems = timeStampsElems.filter(elem => {
-			//if (elem.href.includes("mailto:")) return false;
-			// some other filter conditions? maybe check that `href` match diven regex?
-			if (elem.href.match('#t=[0-9]+$')){ return true; }
-			// console.error('Href not matching:',elem.href);
-			return false;
-		})
-		timeStampsElems.forEach(elem => elem.addEventListener("click", () => this.emphasize()))
-		// store timestamps together with id and time
-		let timeStamps = this.timeStamps = timeStampsElems.map(element => {
-			const url=new URL(element.href);
-			let time=parseInt(url.hash.match('#t=([0-9]+)$')[1]);
-			let id=url.hostname+url.pathname;
-			return {element,id,time};
-		});
-		//
-		// start emphasis
-		this.emphasize();
-	}
-	emphasize() {
-		// clear timeout in case it is called in advance
-		clearTimeout(this.timeout);
-		// get player
-		this._getPlayer()
-		// if present, do actual emphasis
-		if (this.player) this._emphasize();
-		// re-call itself
-		this.timeout = setTimeout(() => this.emphasize(), this.dt);
-	}
-	_emphasize() {
-		// data from player
-		let time = this.player.currentTime;
-		let src = this.player.children[0].src;
-		const url=new URL(src);
-		let id=url.hostname+url.pathname;
-		//
-		// find timestamp next to current time
-		let timeStamp1;
-		for (timeStamp1 of this.timeStamps) {
-			if (timeStamp1.id !== id) { // only consider same id
-				continue;
-			}
-			if (time < timeStamp1.time) {
-				break;
-			}
-		}
-		let index = this.timeStamps.indexOf(timeStamp1);
-		let timeStamp0 = this.timeStamps[index-1];
-		// timeStamp0 and timeStamp1 are stamps just before and just after currently playing time
-		//
-		// get relevant elements
-		let e0 = timeStamp0.element;
-		let e1 = timeStamp1.element;
-		let parent = e0.closest("p,div"); // <p> or <div> element to get widths
-		let {x:xa} = this.article.getBoundingClientRect(); // article as "main" element
-		let {width:w, x} = parent.getBoundingClientRect(); // x,w from <p>
-		let {width:w0, height:h0, x:x0} = e0.getBoundingClientRect(); // x0,w0,h0 from 1st time stamp
-		let {width:w1, height:h1, x:x1} = e1.getBoundingClientRect(); // x1,w1,h1 from 2nd time stamp
-		let t0 = e0.offsetTop; // top of 1st time stamp
-		let t1 = e1.offsetTop; // top of 2nd time stamp
-		let h = t1 + h1 - t0; // total emph height
-		let l = x - xa; // emph left
-		let hm = h - h0 - h1; // middle height
-		let l0 = x0 - x; // left of 1st time stamp
-		let wb = x1 /* + w1 */ - x; // width of bottom emph
-		//
-		//// use the values to style the emphasis
-		let {emph,emphTop,emphMid,emphBot} = this;
-		emph.style.width = `${w}px`;
-		emph.style.height = `${h}px`;
-		emph.style.top = `${t0}px`;
-		emph.style.left = `${l}px`;
-		emphTop.style.height = `${h0}px`;
-		emphTop.style.left = `${l0}px`;
-		emphMid.style.height = `${hm}px`;
-		emphMid.style.top = `${h0}px`;
-		emphBot.style.height = `${h1}px`;
-		emphBot.style.bottom = 0;
-		emphBot.style.width = `${wb}px`;
-	}
-	_getPlayer() {
-		let player = document.getElementById("my_audio_player");
-		if (!player) return;
-		this.player = player
-	}
-}

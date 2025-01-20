@@ -1,6 +1,8 @@
 from docutils import nodes
 from docutils.parsers.rst import Directive, directives
 
+INLINE_PLAYER=True
+
 class syncmedia_node(nodes.General, nodes.Element):
     def __init__(self,uri,opts):
         super().__init__()
@@ -50,15 +52,21 @@ def process_syncmedia_nodes(app, doctree, fromdocname):
     def syncmedia_or_sync(n):
         return isinstance(n,syncmedia_node) or (isinstance(n,nodes.reference) and 'syncmedia' in n['classes'])
     syncmedia_last_node=None
+    counter=0
     for node in doctree.findall(condition=syncmedia_or_sync):
         if isinstance(node,syncmedia_node):
             syncmedia_last_node=node
+            counter+=1
+            node['classes']+=[f'syncmedia-player-no-{counter}']
             continue
         assert isinstance(node,nodes.reference)
         # print(syncmedia_last_uri,node['refuri'])
         if syncmedia_last_node is None: raise RuntimeError(f'{fromdocname} has no syncmedia directive prior to sync timestamp (line {node.line}).')
         playerTimeSec=str(int(hms2ss(node['refuri'])+syncmedia_last_node.get('offset',0)))
         node['refuri']=app.config.syncmedia_prefix+syncmedia_last_node['uri']+'#t='+playerTimeSec
+        node['classes']+=[f'syncmedia-player-no-{counter}']
+
+
     if app.config.syncmedia_hide:
         class syncmedia_remover(object):
             def __init__(self,document): self.document=document
@@ -73,11 +81,16 @@ def visit_syncmedia_node_latex(self,node):
     uri=(self.config.syncmedia_prefix+node['uri'])
     self.body.append(r'''\begin{lrbox}{\syncmediaqr}\qrcode[height=2.5\baselineskip]{%s}\end{lrbox}\lettrine[lraise=0.2]{\usebox{\syncmediaqr}}{} \url{%s}\vskip1.5\baselineskip\par'''%(uri,uri))
 def visit_syncmedia_node_html(self,node):
-    if not 'show' in node: raise nodes.SkipNode
-    atts={'class':'syncmedia reference external','href':f'{node["uri"]}#t={node.get("offset",0)}'}
-    self.body.append(self.starttag(node,'div','',**{'class':'syncmedia-show float-start'}))
-    self.body.append(self.starttag(node,'a','',**atts))
-    self.body.append('🔊')
+    if INLINE_PLAYER:
+        uri=self.config.syncmedia_prefix+node['uri']
+        node['classes']+=['syncmedia-player']
+        self.body.append(self.starttag(node,'div','',**{'data-uri':uri})) # ,**{'class':'syncmedia-player'}))
+    else:
+        if not 'show' in node: raise nodes.SkipNode
+        atts={'class':'syncmedia reference external','href':f'{node["uri"]}#t={node.get("offset",0)}'}
+        self.body.append(self.starttag(node,'div','',**{'class':'syncmedia-show float-start'}))
+        self.body.append(self.starttag(node,'a','',**atts))
+        self.body.append('🔊')
 def depart_syncmedia_node_html(self,node):
     self.body.append('</div>')
     self.depart_reference(node)

@@ -97,8 +97,7 @@ def depart_syncmedia_node_html(self,node):
 
 def visit_syncmedia_node_text(self,node): pass
 
-_jss,_csss=['syncmedia.js',],['syncmedia.css',]
-# https://github.com/sphinx-doc/sphinx/issues/1379#issuecomment-809006086
+_jss,_csss=['syncmedia.js'],['syncmedia.css','https://cdn.vidstack.io/player/theme.css','https://cdn.vidstack.io/player/video.css']
 def copy_asset_files(app,exc):
     from sphinx.util.fileutil import copy_asset
     import os.path
@@ -121,7 +120,7 @@ def setup(app):
     app.connect('doctree-resolved', process_syncmedia_nodes)
     app.connect('build-finished', copy_asset_files)
     # this must be done before copy_asset files, when the build is already finished and js/css would not be mentioned in the HTML file
-    for js in _jss: app.add_js_file(js)
+    for js in _jss: app.add_js_file(js,type='module')
     for css in _csss: app.add_css_file(css)
 
     return dict(parallel_read_safe=True)

@@ -1,14 +1,13 @@
 /*
 TODO:
-	* use other JS player for media since MP3 seeking is otherwise often off (e.g. wavesurfer.xyz)
-		- (with wavesurfer.xyz, it would be cool to show sections as points in the player)
-	* support youtube videos
+	* use vidstack for audio as well (unification), once compat has been checked
+	* use modules instead of CDN paths? https://stackoverflow.com/questions/79376957/importing-vidstack-as-module-from-cdn
 */
 
-// polyfill for text fragment links (for browsers which need it)
+
+import { VidstackPlayer, VidstackPlayerLayout } from 'https://cdn.vidstack.io/player.core';
+
 if (!('fragmentDirective' in document)) { import('https://unpkg.com/text-fragments-polyfill'); }
-
-
 
 class Timestamp{
 	time = -1;
@@ -26,12 +25,17 @@ class SyncMedia {
 
 	static instances=Array();
 
-	constructor(div){
-		this.div = div;
-		this.mediaType = SyncMedia.getMediaType(div.getAttribute('data-uri'));
-		this.tag = SyncMedia.getSyncmediaTag(div);
-		this.player = this.makePlayer(div);
-		this.processTimestamps();
+	constructor(){}
+
+	static async make(div){
+		let ret = new SyncMedia();
+		ret.div = div;
+		ret.mediaType = SyncMedia.getMediaType(div.getAttribute('data-uri'));
+		ret.tag = SyncMedia.getSyncmediaTag(div);
+		ret.player = await ret.makePlayer(div);
+		console.warn(ret.player);
+		ret.processTimestamps();
+		return ret;
 	}
 	static getSyncmediaTag(e){
 		let sp=Array.from(e.classList).filter(function(c){return c.startsWith('syncmedia-player-no-');});
@@ -40,7 +44,8 @@ class SyncMedia {
 	}
 
 	static getMediaType(uri){
-		if(uri.startsWith("https://youtube.com/") || uri.startsWith("https://youtu.be/")) return "youtube";
+		// console.log(`getMediaType(${uri})`);
+		if(uri.startsWith("https://youtube.com/") || uri.startsWith("https://www.youtube.com/") || uri.startsWith("https://youtu.be/")) return "youtube";
 		else return "audio";
 	}
 
@@ -55,16 +60,17 @@ class SyncMedia {
 			}
 			console.assert(SyncMedia.getMediaType(a.href)==this.mediaType);
 			/* arm the timestamp */
-			a.addEventListener("click", (ev) => this.timestampClicked(ev));
+			a.addEventListener("click", async(ev) => this.timestampClicked(ev));
 			this.timestamps.push(new Timestamp(parseInt(match[1]),a));
 		}
 	}
 
-	makePlayer(div){
+	async makePlayer(div){
 		/* TODO: hide player only when :show: was not given in the source (must be passed via an extra class) */
-		div.style.display="none";
+		// div.style.display="none";
+		console.log(`Creating player of type ${this.mediaType}.`);
 		switch(this.mediaType){
-			case "audio":
+			case "audio": {
 				let pl=document.createElement('audio');
 				pl.controls=true;
 				pl.autoplay=false;
@@ -81,44 +87,59 @@ class SyncMedia {
 				};
 				pl.onpause = function() { div.style.display="none"; div.style.position="relative";  div.classList.remove("sticky-top"); div.zIndex=0; };
 				return pl;
-			case "youtube":
-				console.error("youtube player not yet implemented");
-				return undefined;
+			}
+			case "youtube": {
+				this.div.setAttribute("id",this.tag);
+				// let pl=await VidstackPlayer.create({target:this.div,src:div.getAttribute('data-uri'),layout: new VidstackPlayerLayout({})});
+				let pl=await VidstackPlayer.create({target:this.div,src:div.getAttribute('data-uri'),layout: new VidstackPlayerLayout({})});
+				// avoid automatic fullscreen on mobile: https://github.com/vidstack/player/issues/1504
+				// does not work with Fennec (android) anyway...
+				pl.setAttribute('playsinline','');
+				pl.setAttribute('webkit-playsinline','');
+				div.style.display="block"; div.style.position="sticky"; div.classList.add("sticky-top"); div.zIndex=2000;
+				return pl;
+			}
 			default:
 				return undefined;
 		};
 	}
-	timestampClicked(ev){
-		// console.log('timestampClicked',ev.srcElement);
-		// console.log(this.mediaType);
-		// console.log(this.player);
-		// console.log(this.tag);
+	async timestampClicked(ev){
 		ev.preventDefault();
+		// setting the href with #t=... does not set time in itself, do it explicitly here:
+		let tt=ev.srcElement.href.split('#')[1].split('=')[1].split(',');
+		let tNew=Number(tt[0]);
+
 		let pl = this.player;
 		switch(this.mediaType){
 			case "audio":
-				// setting the href with #t=... does not set time in itself, do it explicitly here:
-				let tt=ev.srcElement.href.split('#')[1].split('=')[1].split(',');
 				// console.warn(ev.srcElement.href,tt);
 				pl.pause();
-				pl.currentTime=Number(tt[0]);
-				// pl.duration=10;
-				console.debug('Seeking to:',tt[0],pl.currentTime);
+				// pause all other player as well
+				for(let sm of SyncMedia.instances) sm.pause();
+				pl.currentTime=tNew;
+				console.debug('Seeking to:',tNew,pl.currentTime);
 				pl.play();
-				// Emphasis.instance.emphasize();
 				break;
 			case "youtube":
-				console.error("youtube not yet implemented.");
+				pl.currentTime=tNew;
+				pl.paused=false;
 				break;
 			default:
 				console.error("mediaType not one of 'audio','youtube'?",this.mediaType);
 		};
+		Emphasis.instance.emphasize();
 		return false; // don't follow the HREF
 	};
-	currentTime(){
+	getCurrentTime(){
 		switch(this.mediaType){
 			case "audio": return (this.player.paused ? -1 : this.player.currentTime);
-			case "youtube": console.error("youtube not yet implemented."); return -1;
+			case "youtube": return (this.player.paused ? -1 : this.player.currentTime);
+		}
+	}
+	pause(){
+		switch(this.mediaType){
+			case "audio": if(!this.player.paused) this.player.pause(); return;
+			case "youtube": this.player.pause(); return;
 		}
 	}
 };
@@ -128,18 +149,20 @@ class SyncMedia {
 class Emphasis{
 	static instance = undefined;
 	emph = undefined;
-	dt = 2000; // ms
+	dt = 1000; // ms
+	interval = undefined;
 	constructor(){
 		this.emph = this.makeEmphElement();
-		this.interval = setInterval(()=>this.emphasize(), this.timeout);
+		this.interval = setInterval(()=>this.emphasize(), this.dt);
 	};
 	getActiveTimestampsRange(){
-		let ssm = SyncMedia.instances.filter(function(sm){ return sm.currentTime()>=0; });
+		// console.warn(SyncMedia.instances);
+		let ssm = SyncMedia.instances.filter(function(sm){ return sm.getCurrentTime()>=0; });
 		console.assert(ssm.length <= 1);
 		// console.log('Active players:',ssm)
 		if(ssm.length==0) return [undefined,undefined];
 		let sm = ssm[0];
-		let time = sm.currentTime();
+		let time = sm.getCurrentTime();
 		// console.log('Current time:',time);
 		for(var i=0; i < sm.timestamps.length-1; i++){
 			// console.log(`${sm.timestamps[i].time} <= ${time} < ${sm.timestamps[i+1].time}`);
@@ -207,53 +230,6 @@ class Emphasis{
 };
 
 
-document.addEventListener("DOMContentLoaded", function(){
-	// toggle timestamps icon
-	new ToggleTimestamps();
-	/* construct player instances in <div class="syncmedia-player"> */
-	for(let div of Array.from(document.querySelectorAll("div.syncmedia-player"))){
-		SyncMedia.instances.push(new SyncMedia(div));
-	}
-	/* construct a single emphasizer instance */
-	Emphasis.instance = new Emphasis();
-	/*
-	// for each section, find time range and add play icon next to the title
-	let sections = document.querySelectorAll("section");
-	for (let sect of sections){
-		console.warn(sect);
-		let hhx=sect.querySelectorAll(":scope > h1,h2,h3,h4,h5,h6");
-		if(hhx.len==0) continue; // ??
-		let hx=hhx[0];
-		// if(hx.tagName=='H1') continue;
-		let m0=syncmediaInside(sect)
-		if(!m0) continue;
-		// console.info("m0",m0);
-		let s=sect;
-		let sNext=null;
-		while(s && !sNext){
-			sNext=s.nextElementSibling;
-			if(!sNext) s=s.parentElement;
-		}
-		console.info('→',sNext);
-		let [id0,t0]=syncmediaIdTime(m0.href);
-		var id1,t1;
-		let m1=syncmediaInside(sNext);
-		if(m1==null) t1=null;
-		else{
-			[id1,t1]=syncmediaIdTime(m1.href);
-			if(id0!=id1) t1=null; // play till the end of audio id0
-			id1=null;
-		}
-		console.info(id0,t0,t1);
-		var a=document.createElement('a');
-		a.appendChild(document.createTextNode('[PLAY]'));
-		a.href='https://'+id0+'#t='+t0.toString()+(t1?','+t1.toString():'');
-		a.addEventListener("click", myOpenAudioInPlayer)
-		hx.appendChild(a);
-	}
-	*/
-});
-
 
 class ToggleTimestamps {
 	constructor(){
@@ -271,3 +247,55 @@ class ToggleTimestamps {
 		else{ console.warn("hiding timestamps",document.body.classList); document.body.classList.add(hide); }
 	}
 };
+
+
+
+
+document.addEventListener("DOMContentLoaded", async() => {
+
+	// toggle timestamps icon
+	new ToggleTimestamps();
+	/* construct player instances in <div class="syncmedia-player"> */
+	for(let div of Array.from(document.querySelectorAll("div.syncmedia-player"))){
+		SyncMedia.instances.push(await SyncMedia.make(div));
+	}
+	/* construct a single emphasizer instance */
+	Emphasis.instance = new Emphasis();
+	/*
+		// for each section, find time range and add play icon next to the title
+		let sections = document.querySelectorAll("section");
+		for (let sect of sections){
+			console.warn(sect);
+			let hhx=sect.querySelectorAll(":scope > h1,h2,h3,h4,h5,h6");
+			if(hhx.len==0) continue; // ??
+			let hx=hhx[0];
+			// if(hx.tagName=='H1') continue;
+			let m0=syncmediaInside(sect)
+			if(!m0) continue;
+			// console.info("m0",m0);
+			let s=sect;
+			let sNext=null;
+			while(s && !sNext){
+				sNext=s.nextElementSibling;
+				if(!sNext) s=s.parentElement;
+			}
+			console.info('→',sNext);
+			let [id0,t0]=syncmediaIdTime(m0.href);
+			var id1,t1;
+			let m1=syncmediaInside(sNext);
+			if(m1==null) t1=null;
+			else{
+				[id1,t1]=syncmediaIdTime(m1.href);
+			if(id0!=id1) t1=null; // play till the end of audio id0
+			id1=null;
+			}
+			console.info(id0,t0,t1);
+			var a=document.createElement('a');
+			a.appendChild(document.createTextNode('[PLAY]'));
+			a.href='https://'+id0+'#t='+t0.toString()+(t1?','+t1.toString():'');
+			a.addEventListener("click", myOpenAudioInPlayer)
+			hx.appendChild(a);
+		}
+*/
+});
+

@@ -1,18 +1,30 @@
-/*
-TODO:
-	* use vidstack for audio as well (unification), once compat has been checked
-	* use modules instead of CDN paths? https://stackoverflow.com/questions/79376957/importing-vidstack-as-module-from-cdn
-*/
-
-
 import { VidstackPlayer, VidstackPlayerLayout } from 'https://cdn.vidstack.io/player.core';
 
-if (!('fragmentDirective' in document)) { import('https://unpkg.com/text-fragments-polyfill'); }
+/* polyfill for fragment links */
+/*
+// does not work well (hangs?) plus ff ESR will support it soon natively (others do already)
+if (!('fragmentDirective' in document)) { import('https://cdn.jsdelivr.net/npm/text-fragments-polyfill@6.3.0/dist/text-fragments.min.js'); }
+*/
 
 class Timestamp{
 	time = -1;
 	element = undefined;
-	constructor(time,element){ this.time=time; this.element=element; }
+   spans = [];
+	constructor(time,element,spans){ this.time=time; this.element=element; this.spans=spans; }
+}
+
+function nextNode(n){
+   /* don't descend into
+      - span: would return the plain text element inside;
+      - headings (have spans inside, but we don't want to highlight those)
+   */
+   const noDescend=new Set(['SPAN','H1','H2','H3','H4','H5','H6']);
+   if(n.firstChild && !(n.nodeType===Node.ELEMENT_NODE && noDescend.has(n.tagName))) { return n.firstChild; }
+   while(n){
+      if(n.nextSibling) return n.nextSibling;
+      n=n.parentNode;
+   };
+   return null;
 }
 
 class SyncMedia {
@@ -32,8 +44,9 @@ class SyncMedia {
 		ret.div = div;
 		ret.mediaType = SyncMedia.getMediaType(div.getAttribute('data-uri'));
 		ret.tag = SyncMedia.getSyncmediaTag(div);
+		console.log('Making new player for ',ret.mediaType,ret.tag)
 		ret.player = await ret.makePlayer(div);
-		console.warn(ret.player);
+		// console.warn(ret.player);
 		ret.processTimestamps();
 		return ret;
 	}
@@ -44,9 +57,15 @@ class SyncMedia {
 	}
 
 	static getMediaType(uri){
+		//const url=new URL(uri); // this fails with "../dir/file.opus" (invalid URL)
+		//const p=url.pathname;
+		const p=uri.split('#')[0].split('?')[0];
+		if(p.endsWith('.mp3') || p.endsWith('.m4a') || p.endsWith('.opus') || p.endsWith('.webm')) return 'audio';
+		return 'vidstack';
 		// console.log(`getMediaType(${uri})`);
-		if(uri.startsWith("https://youtube.com/") || uri.startsWith("https://www.youtube.com/") || uri.startsWith("https://youtu.be/")) return "youtube";
-		else return "audio";
+		// if(uri.startsWith("https://youtube.com/") || uri.startsWith("https://www.youtube.com/") || uri.startsWith("https://youtu.be/")) return "vidstack";
+		// if(uri.startsWith("https://player.vimeo.com/")) return "vimeo";
+		// else return "audio";
 	}
 
 	processTimestamps(){
@@ -61,7 +80,35 @@ class SyncMedia {
 			console.assert(SyncMedia.getMediaType(a.href)==this.mediaType);
 			/* arm the timestamp */
 			a.addEventListener("click", async(ev) => this.timestampClicked(ev));
-			this.timestamps.push(new Timestamp(parseInt(match[1]),a));
+         let spans=[];
+         const container=document.getElementsByTagName('article')[0]
+         /* find all spans to be highlighted for this timestamp */
+         if(true){
+            let node=nextNode(a);
+            while(node=nextNode(node)){
+               // outside of the main article, don't go any further
+               if(container && !container.contains(node)) break;
+               if(node.nodeType===Node.TEXT_NODE){
+                  // convert plain text to span
+                  if(node.nodeValue.trim()=='') continue;
+                  let span=document.createElement("span");
+                  span.textContent=node.nodeValue;
+                  node.replaceWith(span);
+                  node=span;
+               }
+               if(node.nodeType==Node.ELEMENT_NODE){
+                  // at the next sync point, or next syncmedia player
+                  if(node.classList.contains('syncmedia-player') || node.classList.contains('syncmedia')) break;
+                  // skip anything which is not <span>
+                  if(node.tagName!='SPAN') continue;
+               } else continue;
+               console.assert(node.nodeType===Node.ELEMENT_NODE);
+               // console.log(node);
+               node.classList.add(`syncmedia-span-${this.timestamps.length%2}`);
+               spans.push(node);
+            }
+         };
+			this.timestamps.push(new Timestamp(parseInt(match[1]),a,spans));
 		}
 	}
 
@@ -81,14 +128,20 @@ class SyncMedia {
 				div.appendChild(pl);
 				pl.children[0].src=div.getAttribute("data-uri");
 				pl.load(); // if src changed, needs to be reloaded (otherwise previous href will be played)
+				pl.currentTime=Number.parseInt(div.getAttribute("data-offset")??"0")??0;
 				pl.onplay = function() {
-					/* TODO: pause all other players */
-					div.style.display="block"; div.style.position="sticky"; div.classList.add("sticky-top"); div.zIndex=1000;
+					/* pause all other players */
+					for(let sm of SyncMedia.instances){ if(sm.player!=this) sm.pause(); }
+					if(div.getAttribute("data-show")===null) div.style.display="block";
+					div.classList.add("sticky-top"); div.classList.add("sticky-bottom"); div.zIndex=2000;
 				};
-				pl.onpause = function() { div.style.display="none"; div.style.position="relative";  div.classList.remove("sticky-top"); div.zIndex=0; };
+				pl.onpause = function() {
+					if(div.getAttribute("data-show")===null) div.style.display="none";
+					div.classList.remove("sticky-top"); div.classList.remove("sticky-bottom"); div.zIndex=0;
+				};
 				return pl;
 			}
-			case "youtube": {
+			case "vidstack": {
 				this.div.setAttribute("id",this.tag);
 				// let pl=await VidstackPlayer.create({target:this.div,src:div.getAttribute('data-uri'),layout: new VidstackPlayerLayout({})});
 				let pl=await VidstackPlayer.create({target:this.div,src:div.getAttribute('data-uri'),layout: new VidstackPlayerLayout({})});
@@ -100,6 +153,7 @@ class SyncMedia {
 				return pl;
 			}
 			default:
+				console.error('Undefined mediaType (should be one of: audio, vidstack)',this.mediaType);
 				return undefined;
 		};
 	}
@@ -120,12 +174,12 @@ class SyncMedia {
 				console.debug('Seeking to:',tNew,pl.currentTime);
 				pl.play();
 				break;
-			case "youtube":
+			case "vidstack":
 				pl.currentTime=tNew;
 				pl.paused=false;
 				break;
 			default:
-				console.error("mediaType not one of 'audio','youtube'?",this.mediaType);
+				console.error("mediaType not one of 'audio','vidstack'?",this.mediaType);
 		};
 		Emphasis.instance.emphasize();
 		return false; // don't follow the HREF
@@ -133,13 +187,13 @@ class SyncMedia {
 	getCurrentTime(){
 		switch(this.mediaType){
 			case "audio": return (this.player.paused ? -1 : this.player.currentTime);
-			case "youtube": return (this.player.paused ? -1 : this.player.currentTime);
+			case "vidstack": return (this.player.paused ? -1 : this.player.currentTime);
 		}
 	}
 	pause(){
 		switch(this.mediaType){
 			case "audio": if(!this.player.paused) this.player.pause(); return;
-			case "youtube": this.player.pause(); return;
+			case "vidstack": this.player.pause(); return;
 		}
 	}
 };
@@ -148,84 +202,42 @@ class SyncMedia {
 
 class Emphasis{
 	static instance = undefined;
-	emph = undefined;
 	dt = 1000; // ms
 	interval = undefined;
+   spansPlaying = [];
 	constructor(){
-		this.emph = this.makeEmphElement();
 		this.interval = setInterval(()=>this.emphasize(), this.dt);
 	};
-	getActiveTimestampsRange(){
+	getActiveTimestamp(){
 		// console.warn(SyncMedia.instances);
 		let ssm = SyncMedia.instances.filter(function(sm){ return sm.getCurrentTime()>=0; });
 		console.assert(ssm.length <= 1);
 		// console.log('Active players:',ssm)
-		if(ssm.length==0) return [undefined,undefined];
+		if(ssm.length==0) return undefined;
 		let sm = ssm[0];
 		let time = sm.getCurrentTime();
 		// console.log('Current time:',time);
+      // FIXME: sm.timestamps are sorted, use better search
 		for(var i=0; i < sm.timestamps.length-1; i++){
 			// console.log(`${sm.timestamps[i].time} <= ${time} < ${sm.timestamps[i+1].time}`);
 			if(sm.timestamps[i].time<=time && sm.timestamps[i+1].time>time){
 				// console.log('HERE!')
-				return [sm.timestamps[i].element,sm.timestamps[i+1].element];
+				return sm.timestamps[i];
 			}
 		}
-		return [undefined,undefined];
+		return undefined;
 	}
+	removeEmphasis(){
+      for(const span of this.spansPlaying) span.classList.remove('syncmedia-currently-playing');
+   }
 	emphasize(){
-		const [e0,e1]=this.getActiveTimestampsRange();
-		if(e0 === undefined) return;
-		// console.log(e0,e1);
-		let parent = e0.closest("p,div"); // <p> or <div> element to get widths
-		let art = this.emph.parentElement;
-		let {x:xa} = art.getBoundingClientRect(); // article as "main" element
-		let {width:w, x} = parent.getBoundingClientRect(); // x,w from <p>
-		let {height:h0, x:x0} = e0.getBoundingClientRect(); // x0,w0,h0 from 1st time stamp
-		let {height:h1, x:x1} = e1.getBoundingClientRect(); // x1,w1,h1 from 2nd time stamp
-		let t0 = e0.offsetTop; // top of 1st time stamp
-		let t1 = e1.offsetTop; // top of 2nd time stamp
-		let h = t1 + h1 - t0; // total emph height
-		let l = x - xa; // emph left
-		let hm = h - h0 - h1; // middle height
-		let l0 = x0 - x; // left of 1st time stamp
-		let wb = x1 /* + w1 */ - x; // width of bottom emph
-		//// use the values to style the emphasis
-		const [emphTop,emphMid,emphBot]=this.emph.children;
-		// let {emph,emphTop,emphMid,emphBot} = this;
-		this.emph.style.width = `${w}px`;
-		this.emph.style.height = `${h}px`;
-		this.emph.style.top = `${t0}px`;
-		this.emph.style.left = `${l}px`;
-		emphTop.style.height = `${h0}px`;
-		emphTop.style.left = `${l0}px`;
-		emphMid.style.height = `${hm}px`;
-		emphMid.style.top = `${h0}px`;
-		emphBot.style.height = `${h1}px`;
-		emphBot.style.bottom = 0;
-		emphBot.style.width = `${wb}px`;
-	}
-	makeEmphElement(){
-		// find main <article> element for dimensions
-		let arts = document.getElementsByTagName("article");
-		console.assert(arts.length==1);
-		let art = arts[0];
-		art.style.position = "relative"
-		// parent element for emphasis
-		let emph = this.emph = document.createElement("div");
-		emph.style.position = "absolute";
-		emph.style.zIndex = -9999;
-		emph.style.overflow = "hidden";
-		// top, middle, bottom
-		for (let i of [0,1,2]){
-			let e = document.createElement("div");
-			e.style.position = "absolute";
-			e.style.backgroundColor = "rgba(0,127,0,0.4)";
-			e.style.width = "100%";
-			emph.appendChild(e);
-		}
-		art.appendChild(emph);
-		return emph;
+		const ts=this.getActiveTimestamp();
+		if(ts === undefined){ this.removeEmphasis(); return; }
+		// console.log(ts);
+      if(ts.spans.length>0 && ts.spans[0]==this.spansPlaying[0]) return;
+      this.removeEmphasis();
+      for(const span of ts.spans) span.classList.add('syncmedia-currently-playing');
+      this.spansPlaying=ts.spans;
 	}
 };
 
@@ -233,11 +245,12 @@ class Emphasis{
 
 class ToggleTimestamps {
 	constructor(){
+		let buttons=document.getElementsByClassName('article-header-buttons')[0];
+		if(buttons===undefined){ console.warn('Not adding timestamp toggle; no element with article-header-buttons class'); return; }
 		let button=document.createElement('button');
 		button.classList.add('btn','btn-sm','navbar-btn','syncmedia-hide-button');
 		button.innerHTML='<i class="fa-solid fa-lg fa-stopwatch"/>';
 		console.info(button.innerHTML);
-		let buttons=document.getElementsByClassName('article-header-buttons')[0];
 		buttons.insertBefore(button,buttons.firstChild);
 		button.addEventListener("click",this.toggleTimestamps);
 	}
@@ -256,7 +269,9 @@ document.addEventListener("DOMContentLoaded", async() => {
 	// toggle timestamps icon
 	new ToggleTimestamps();
 	/* construct player instances in <div class="syncmedia-player"> */
+	console.log('Iterating over all syncmedia-player divs');
 	for(let div of Array.from(document.querySelectorAll("div.syncmedia-player"))){
+		console.log(div)
 		SyncMedia.instances.push(await SyncMedia.make(div));
 	}
 	/* construct a single emphasizer instance */

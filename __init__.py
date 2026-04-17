@@ -42,7 +42,7 @@ def ss2hms(ss):
 def sync_timestamp_role(name,rawtext,text,lineno,inliner,options={},content=[]):
     try: ss=hms2ss(text)
     except ValueError as e:
-        msg=inliner.reporter.error(e.message)
+        msg=inliner.reporter.error(e.args)
         return [inliner.problematic(rawtext,rawtext,msg)],[msg]
     app=inliner.document.settings.env.app
     node=nodes.reference(rawtext,text,internal=False,classes=['syncmedia'],refuri=text)
@@ -84,7 +84,10 @@ def visit_syncmedia_node_html(self,node):
     if INLINE_PLAYER:
         uri=self.config.syncmedia_prefix+node['uri']
         node['classes']+=['syncmedia-player']
-        self.body.append(self.starttag(node,'div','',**{'data-uri':uri})) # ,**{'class':'syncmedia-player'}))
+        data={'data-uri':uri};
+        if node.get('show',False): data['data-show']=''
+        if (offset:=node.get('offset',0))>0: data['data-offset']=offset
+        self.body.append(self.starttag(node,'div','',**data)) # ,**{'class':'syncmedia-player'}))
     else:
         if not 'show' in node: raise nodes.SkipNode
         atts={'class':'syncmedia reference external','href':f'{node["uri"]}#t={node.get("offset",0)}'}
